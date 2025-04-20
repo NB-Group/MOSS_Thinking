@@ -23,19 +23,60 @@ logger = logging.getLogger(__name__)
 
 def download_dataset() -> Any:
     """
-    从ModelScope下载数据集
+    从ModelScope下载数据集，支持缓存和断点续传
     """
     logger.info(f"正在下载数据集: {config.DATASET_ID}")
+    
+    # 检查是否有缓存，这个路径模式和ModelScope的缓存规则有关
+    cache_path = os.path.join(os.path.expanduser("~"), ".cache", "modelscope", "hub", 
+                            "datasets", config.DATASET_ID.replace("/", "_"))
+    alt_cache_path = os.path.join(config.CACHE_DIR, config.DATASET_ID.replace("/", "-"))
+    
+    # 尝试加载本地缓存
+    if os.path.exists(cache_path) or os.path.exists(alt_cache_path):
+        logger.info(f"检测到数据集缓存，尝试从缓存加载")
+        try:
+            # 首先尝试使用MsDataset加载
+            from modelscope.msdatasets import MsDataset
+            dataset = MsDataset.load(config.DATASET_ID, subset_name='default', split='train', 
+                                    cache_dir=config.CACHE_DIR, download_mode='reuse_cache_if_exists')
+            logger.info(f"从缓存成功加载数据集，包含 {len(dataset)} 条样本")
+            
+            # 转换为项目所需的数据格式
+            dataset_dict = {"train": []}
+            for item in dataset:
+                # 确保样本包含必要的字段
+                if "instruction" in item and "output" in item:
+                    # 构建输入文本，结合instruction和input字段
+                    input_text = item["instruction"]
+                    if "input" in item and item["input"]:
+                        input_text += "\n" + item["input"]
+                    
+                    # 将数据转换为所需格式
+                    dataset_dict["train"].append({
+                        "input": input_text,
+                        "output": item["output"]  # 输出已经包含了<think>标记的思考过程
+                    })
+            
+            logger.info(f"已转换 {len(dataset_dict['train'])} 条数据")
+            return dataset_dict
+        except Exception as e:
+            logger.warning(f"从缓存加载数据集失败: {e}，将尝试重新下载")
+    
+    # 如果缓存加载失败或不存在缓存，则从ModelScope下载
     try:
         # 直接使用MsDataset.load下载数据集
         logger.info(f"使用MsDataset.load下载数据集: {config.DATASET_ID}")
+        
+        # 添加进度条显示
+        print(f"开始下载数据集: {config.DATASET_ID}")
+        print(f"这可能需要几分钟时间，请耐心等待...")
+        
+        from modelscope.msdatasets import MsDataset
         dataset = MsDataset.load(config.DATASET_ID, subset_name='default', split='train', cache_dir=config.CACHE_DIR)
         logger.info(f"数据集下载完成，包含 {len(dataset)} 条样本")
         
         # 根据样本结构转换数据集
-        # 样本结构: {'instruction': '...', 'input': '...', 'output': '...', 'repo_name': '...', 
-        #           'prompt_tokens_len': int, 'reasoning_content_tokens_len': int, 
-        #           'content_tokens_len': int, 'score': int}
         dataset_dict = {"train": []}
         
         # 遍历数据集样本
@@ -84,7 +125,7 @@ def load_dataset_from_files(dataset_path: str) -> Dict:
     for json_file in json_files:
         logger.info(f"加载文件: {json_file}")
         try:
-            if json_file.endswith('.jsonl'):
+            if (json_file.endswith('.jsonl')):
                 # jsonl格式
                 with open(json_file, 'r', encoding='utf-8') as f:
                     for line in f:
