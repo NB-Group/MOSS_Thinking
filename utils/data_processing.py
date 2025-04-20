@@ -32,15 +32,25 @@ def download_dataset() -> Any:
         dataset = MsDataset.load(config.DATASET_ID, subset_name='default', split='train', cache_dir=config.CACHE_DIR)
         logger.info(f"数据集下载完成，包含 {len(dataset)} 条样本")
         
-        # 转换为项目所需的数据格式
+        # 根据样本结构转换数据集
+        # 样本结构: {'instruction': '...', 'input': '...', 'output': '...', 'repo_name': '...', 
+        #           'prompt_tokens_len': int, 'reasoning_content_tokens_len': int, 
+        #           'content_tokens_len': int, 'score': int}
         dataset_dict = {"train": []}
+        
+        # 遍历数据集样本
         for item in dataset:
-            # 确保每个样本至少有必要的字段
-            if "conversation" in item:
+            # 确保样本包含必要的字段
+            if "instruction" in item and "output" in item:
+                # 构建输入文本，结合instruction和input字段
+                input_text = item["instruction"]
+                if "input" in item and item["input"]:
+                    input_text += "\n" + item["input"]
+                
                 # 将数据转换为所需格式
                 dataset_dict["train"].append({
-                    "input": item["conversation"] if isinstance(item["conversation"], str) else str(item["conversation"]),
-                    # 可以添加更多转换字段
+                    "input": input_text,
+                    "output": item["output"]  # 输出已经包含了<think>标记的思考过程
                 })
         
         logger.info(f"已转换 {len(dataset_dict['train'])} 条数据")
