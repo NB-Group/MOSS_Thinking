@@ -21,6 +21,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def check_model_cache(model_id):
+    """
+    检查模型是否已经在缓存中
+    
+    Args:
+        model_id: 模型ID，格式为 "组织/模型名称" 
+        
+    Returns:
+        str: 缓存路径，如果存在；None，如果不存在
+    """
+    # 检查常见的缓存路径
+    # 1. ModelScope默认缓存路径
+    home_cache = os.path.join(os.path.expanduser("~"), ".cache", "modelscope", "hub", model_id.replace("/", "_"))
+    
+    # 2. 工作目录缓存路径
+    work_cache = os.path.join(config.CACHE_DIR, model_id.replace("/", "_"))
+    
+    # 3. 工作目录缓存路径(第二种格式) 
+    work_cache2 = os.path.join(config.CACHE_DIR, model_id.split("/")[0], model_id.split("/")[1])
+    
+    # 4. 工作目录缓存路径(第三种格式)
+    work_cache3 = os.path.join(config.CACHE_DIR, model_id.split("/")[0], model_id.split("/")[1].replace(".", "___"))
+    
+    # 检查这些路径是否存在
+    for cache_path in [home_cache, work_cache, work_cache2, work_cache3]:
+        if os.path.exists(cache_path):
+            logger.info(f"在缓存中找到模型: {cache_path}")
+            return cache_path
+            
+    logger.info(f"未在缓存中找到模型: {model_id}")
+    return None
+
 def main():
     parser = argparse.ArgumentParser(description="训练能够'边想边说'的模型")
     parser.add_argument("--model_path", type=str, default=None,
@@ -45,15 +77,29 @@ def main():
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # 使用模型路径或从ModelScope下载
+    # 使用模型路径或从缓存/ModelScope获取
     model_path = args.model_path
     if model_path is None:
-        logger.info(f"从ModelScope下载学生模型: {config.STUDENT_MODEL_ID}")
-        from utils.data_processing import download_models
-        _, model_path = download_models()
+        # 首先检查缓存
+        cached_path = check_model_cache(config.STUDENT_MODEL_ID)
+        if cached_path:
+            logger.info(f"使用缓存中的学生模型: {cached_path}")
+            model_path = cached_path
+        else:
+            # 如果缓存中没有，则下载
+            logger.info(f"从ModelScope下载学生模型: {config.STUDENT_MODEL_ID}")
+            from utils.data_processing import download_models
+            try:
+                # 只下载学生模型，不下载教师模型
+                from modelscope import snapshot_download
+                model_path = snapshot_download(config.STUDENT_MODEL_ID, cache_dir=config.CACHE_DIR)
+                logger.info(f"学生模型下载完成: {model_path}")
+            except:
+                logger.warning(f"下载失败，尝试另一种方法获取模型")
+                _, model_path = download_models()
     
     # 加载分词器和模型
-    logger.info("加载分词器和模型")
+    logger.info(f"加载分词器和模型：{model_path}")
     tokenizer, model = load_tokenizer_and_model(
         model_path=model_path,
         use_lora=not args.no_lora
