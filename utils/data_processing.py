@@ -8,24 +8,82 @@ import torch
 import logging
 from tqdm import tqdm
 from typing import Dict, List, Any, Optional, Tuple
-from datasets import load_dataset, Dataset, DatasetDict
+# 只使用ModelScope的API，不使用HuggingFace的datasets
 from modelscope import snapshot_download, AutoModelForCausalLM, AutoTokenizer
 import torch.nn.functional as F
-from transformers import AutoTokenizer as HFAutoTokenizer
 
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def download_dataset() -> Dataset:
+def download_dataset() -> Any:
     """
     从ModelScope下载数据集
     """
     logger.info(f"正在下载数据集: {config.DATASET_ID}")
-    dataset = load_dataset("modelscope:" + config.DATASET_ID, cache_dir=config.CACHE_DIR)
-    logger.info(f"数据集下载完成，包含 {len(dataset['train'])} 条训练数据")
-    return dataset
+    try:
+        # 使用ModelScope的CLI下载数据集
+        import subprocess
+        cmd = f"python -m modelscope.cli.download_dataset --dataset_id {config.DATASET_ID} --cache_dir {config.CACHE_DIR}"
+        logger.info(f"执行命令: {cmd}")
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"数据集下载失败: {result.stderr}")
+            raise Exception("数据集下载失败")
+            
+        # 返回假的dataset对象，后续代码会被调整为直接读取文件
+        dataset_path = os.path.join(config.CACHE_DIR, config.DATASET_ID.replace('/', '-'))
+        logger.info(f"数据集下载完成，保存在: {dataset_path}")
+        
+        # 加载数据集为字典
+        return load_dataset_from_files(dataset_path)
+    except Exception as e:
+        logger.error(f"数据集下载失败: {e}")
+        logger.info("请尝试手动下载数据集，从ModelScope网站下载后放入缓存目录")
+        # 返回空数据集，让流程能继续
+        return {"train": []}
+
+def load_dataset_from_files(dataset_path: str) -> Dict:
+    """从本地文件加载数据集"""
+    logger.info(f"从目录加载数据集: {dataset_path}")
+    
+    # 搜索目录下的json文件
+    json_files = []
+    for root, _, files in os.walk(dataset_path):
+        for file in files:
+            if file.endswith('.json') or file.endswith('.jsonl'):
+                json_files.append(os.path.join(root, file))
+    
+    if not json_files:
+        logger.warning(f"在 {dataset_path} 中没有找到json文件")
+        return {"train": []}
+    
+    # 加载每个json文件的内容
+    all_data = []
+    for json_file in json_files:
+        logger.info(f"加载文件: {json_file}")
+        try:
+            if json_file.endswith('.jsonl'):
+                # jsonl格式
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        all_data.append(json.loads(line))
+            else:
+                # json格式
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        all_data.extend(data)
+                    else:
+                        all_data.append(data)
+        except Exception as e:
+            logger.error(f"加载文件 {json_file} 失败: {e}")
+    
+    logger.info(f"已加载 {len(all_data)} 条数据")
+    return {"train": all_data}
 
 def download_models() -> Tuple[str, str]:
     """
@@ -71,7 +129,7 @@ def format_think_segments(text: str) -> str:
     
     return '\n'.join(formatted_lines)
 
-def generate_teacher_outputs(teacher_model_path: str, dataset: Dataset, 
+def generate_teacher_outputs(teacher_model_path: str, dataset: Dict, 
                             num_samples: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     使用教师模型生成带有思考步骤的输出
@@ -101,13 +159,19 @@ def generate_teacher_outputs(teacher_model_path: str, dataset: Dataset,
 请先思考，再给出答案："""
 
     results = []
-    samples = dataset["train"] if num_samples is None else dataset["train"].select(range(min(num_samples, len(dataset["train"]))))
+    samples = dataset["train"]
+    if num_samples is not None:
+        samples = samples[:min(num_samples, len(samples))]
     
     logger.info(f"使用教师模型生成 {len(samples)} 条样本的思考过程")
     
     for idx, sample in enumerate(tqdm(samples)):
         # 准备输入
-        question = sample["input"]
+        question = sample.get("input", sample.get("prompt", sample.get("question", "")))
+        if not question:
+            logger.warning(f"样本 {idx} 没有有效的输入字段，跳过")
+            continue
+            
         prompt = teacher_prompt_template.format(question=question)
         
         # 生成教师模型的输出
@@ -171,7 +235,7 @@ def prepare_distillation_dataset(teacher_outputs: List[Dict[str, Any]],
     
     logger.info(f"已保存 {len(train_data)} 条训练数据和 {len(val_data)} 条验证数据到 {output_dir}")
 
-def load_processed_dataset(data_dir: str = config.PROCESSED_DATA_DIR) -> DatasetDict:
+def load_processed_dataset(data_dir: str = config.PROCESSED_DATA_DIR) -> Dict:
     """
     加载处理后的数据集
     """
@@ -187,7 +251,7 @@ def load_processed_dataset(data_dir: str = config.PROCESSED_DATA_DIR) -> Dataset
     with open(val_path, "r", encoding="utf-8") as f:
         val_data = json.load(f)
     
-    return DatasetDict({
-        "train": Dataset.from_list(train_data),
-        "validation": Dataset.from_list(val_data)
-    })
+    return {
+        "train": train_data,
+        "validation": val_data
+    }

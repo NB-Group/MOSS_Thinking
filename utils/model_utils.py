@@ -6,9 +6,9 @@ import os
 import torch
 import logging
 from typing import Dict, List, Tuple, Optional, Union, Any
+# 使用ModelScope中的AutoModelForCausalLM和AutoTokenizer来替代Huggingface的对应组件
+from modelscope import AutoTokenizer, AutoModelForCausalLM
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
     TrainingArguments,
     Trainer,
     DataCollatorForSeq2Seq,
@@ -19,7 +19,8 @@ from peft import (
     prepare_model_for_kbit_training,
     TaskType
 )
-from datasets import Dataset
+# 不再直接依赖datasets库
+import torch.utils.data
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -27,6 +28,18 @@ import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+class SimpleDataset(torch.utils.data.Dataset):
+    """简单的数据集类，替代Huggingface的Dataset"""
+    
+    def __init__(self, data: List[Dict[str, Any]]):
+        self.data = data
+        
+    def __len__(self):
+        return len(self.data)
+        
+    def __getitem__(self, idx):
+        return self.data[idx]
 
 def load_tokenizer_and_model(model_path: str, use_lora: bool = config.USE_LORA) -> Tuple[AutoTokenizer, AutoModelForCausalLM]:
     """
@@ -79,26 +92,26 @@ def load_tokenizer_and_model(model_path: str, use_lora: bool = config.USE_LORA) 
     
     return tokenizer, model
 
-def prepare_training_data(tokenizer: AutoTokenizer, dataset: Dataset) -> Dataset:
+def prepare_training_data(tokenizer: AutoTokenizer, dataset: Dict) -> Dict[str, SimpleDataset]:
     """
     处理数据集为训练格式
     
     Args:
         tokenizer: 分词器
-        dataset: 数据集
+        dataset: 数据集字典，包含train和validation
         
     Returns:
         处理后的数据集
     """
     logger.info("准备训练数据")
     
-    def process_function(examples):
-        # 构建输入文本
-        inputs = [f"用户: {ex}" for ex in examples["input"]]
-        targets = [f"助手: {ex}" for ex in examples["output"]]
+    def process_batch(batch_data):
+        """批处理函数"""
+        inputs = [f"用户: {item['input']}" for item in batch_data]
+        targets = [f"助手: {item['output']}" for item in batch_data]
         
         # 编码输入
-        model_inputs = tokenizer(
+        model_inputs_dict = tokenizer(
             inputs,
             max_length=config.MAX_SOURCE_LENGTH,
             padding="max_length",
@@ -117,23 +130,44 @@ def prepare_training_data(tokenizer: AutoTokenizer, dataset: Dataset) -> Dataset
         
         # 将填充的token标记为-100，使得在计算损失时被忽略
         labels = torch.where(labels == tokenizer.pad_token_id, -100, labels)
-        model_inputs["labels"] = labels
+        model_inputs_dict["labels"] = labels
         
-        return model_inputs
+        return model_inputs_dict
     
-    processed_datasets = dataset.map(
-        process_function,
-        batched=True,
-        remove_columns=dataset["train"].column_names,
-        desc="处理数据集"
-    )
+    # 处理批次并转换为Dataset格式
+    def process_dataset(data_list):
+        batch_size = 8  # 内部处理批次大小
+        processed_data = []
+        
+        for i in range(0, len(data_list), batch_size):
+            batch = data_list[i:i+batch_size]
+            batch_inputs = process_batch(batch)
+            
+            # 将批次数据拆分为单个样本
+            for j in range(len(batch)):
+                item = {}
+                for k, v in batch_inputs.items():
+                    item[k] = v[j]
+                processed_data.append(item)
+                
+        return SimpleDataset(processed_data)
     
-    return processed_datasets
+    # 处理训练集和验证集
+    logger.info(f"处理 {len(dataset['train'])} 条训练数据")
+    train_dataset = process_dataset(dataset["train"])
+    
+    logger.info(f"处理 {len(dataset['validation'])} 条验证数据")
+    eval_dataset = process_dataset(dataset["validation"])
+    
+    return {
+        "train": train_dataset,
+        "validation": eval_dataset
+    }
 
 def create_trainer(model: AutoModelForCausalLM, 
                   tokenizer: AutoTokenizer, 
-                  train_dataset: Dataset, 
-                  eval_dataset: Optional[Dataset] = None,
+                  train_dataset: SimpleDataset, 
+                  eval_dataset: Optional[SimpleDataset] = None,
                   output_dir: str = config.OUTPUT_DIR) -> Trainer:
     """
     创建训练器
