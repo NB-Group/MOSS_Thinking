@@ -10,6 +10,8 @@ from tqdm import tqdm
 from typing import Dict, List, Any, Optional, Tuple
 # 只使用ModelScope的API，不使用HuggingFace的datasets
 from modelscope import snapshot_download, AutoModelForCausalLM, AutoTokenizer
+# 使用MsDataset直接下载数据集
+from modelscope.msdatasets import MsDataset
 import torch.nn.functional as F
 
 import sys
@@ -25,24 +27,30 @@ def download_dataset() -> Any:
     """
     logger.info(f"正在下载数据集: {config.DATASET_ID}")
     try:
-        # 使用ModelScope的CLI下载数据集
-        import subprocess
-        cmd = f"python -m modelscope.cli.download_dataset --dataset_id {config.DATASET_ID} --cache_dir {config.CACHE_DIR}"
-        logger.info(f"执行命令: {cmd}")
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error(f"数据集下载失败: {result.stderr}")
-            raise Exception("数据集下载失败")
-            
-        # 返回假的dataset对象，后续代码会被调整为直接读取文件
-        dataset_path = os.path.join(config.CACHE_DIR, config.DATASET_ID.replace('/', '-'))
-        logger.info(f"数据集下载完成，保存在: {dataset_path}")
+        # 直接使用MsDataset.load下载数据集
+        logger.info(f"使用MsDataset.load下载数据集: {config.DATASET_ID}")
+        dataset = MsDataset.load(config.DATASET_ID, subset_name='default', split='train', cache_dir=config.CACHE_DIR)
+        logger.info(f"数据集下载完成，包含 {len(dataset)} 条样本")
         
-        # 加载数据集为字典
-        return load_dataset_from_files(dataset_path)
+        # 转换为项目所需的数据格式
+        dataset_dict = {"train": []}
+        for item in dataset:
+            # 确保每个样本至少有必要的字段
+            if "conversation" in item:
+                # 将数据转换为所需格式
+                dataset_dict["train"].append({
+                    "input": item["conversation"] if isinstance(item["conversation"], str) else str(item["conversation"]),
+                    # 可以添加更多转换字段
+                })
+        
+        logger.info(f"已转换 {len(dataset_dict['train'])} 条数据")
+        return dataset_dict
     except Exception as e:
         logger.error(f"数据集下载失败: {e}")
-        logger.info("请尝试手动下载数据集，从ModelScope网站下载后放入缓存目录")
+        logger.info("请尝试手动下载数据集并放入缓存目录")
+        logger.info("手动下载方法:")
+        logger.info("from modelscope.msdatasets import MsDataset")
+        logger.info(f"ds = MsDataset.load('{config.DATASET_ID}', subset_name='default', split='train')")
         # 返回空数据集，让流程能继续
         return {"train": []}
 
