@@ -168,7 +168,10 @@ def create_trainer(model: AutoModelForCausalLM,
                   tokenizer: AutoTokenizer, 
                   train_dataset: SimpleDataset, 
                   eval_dataset: Optional[SimpleDataset] = None,
-                  output_dir: str = config.OUTPUT_DIR) -> Trainer:
+                  output_dir: str = config.OUTPUT_DIR,
+                  batch_size: int = config.BATCH_SIZE,
+                  learning_rate: float = config.LEARNING_RATE,
+                  num_train_epochs: int = config.NUM_TRAIN_EPOCHS) -> Trainer:
     """
     创建训练器
     
@@ -178,11 +181,21 @@ def create_trainer(model: AutoModelForCausalLM,
         train_dataset: 训练数据集
         eval_dataset: 评估数据集
         output_dir: 输出目录
+        batch_size: 训练批次大小
+        learning_rate: 学习率
+        num_train_epochs: 训练轮数
         
     Returns:
         Trainer实例
     """
     logger.info("创建训练器")
+    
+    # 设置混合精度训练
+    # 优先使用BF16（更快更精确），如果不支持则使用FP16
+    use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    use_fp16 = torch.cuda.is_available() and not use_bf16
+    
+    logger.info(f"混合精度训练配置: bf16={use_bf16}, fp16={use_fp16}")
     
     # 设置训练参数
     training_args = TrainingArguments(
@@ -192,16 +205,16 @@ def create_trainer(model: AutoModelForCausalLM,
         eval_steps=500 if eval_dataset is not None else None,
         save_steps=500,
         save_total_limit=3,
-        learning_rate=config.LEARNING_RATE,
-        per_device_train_batch_size=config.BATCH_SIZE,
-        per_device_eval_batch_size=config.BATCH_SIZE,
+        learning_rate=learning_rate,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=config.GRADIENT_ACCUMULATION_STEPS,
-        num_train_epochs=config.NUM_TRAIN_EPOCHS,
+        num_train_epochs=num_train_epochs,
         warmup_ratio=config.WARMUP_RATIO,
         logging_dir=f"{output_dir}/logs",
         logging_steps=config.LOGGING_STEPS,
-        fp16=torch.cuda.is_available(),
-        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+        fp16=use_fp16,  # 只有在不支持bf16时才使用fp16
+        bf16=use_bf16,  # 优先使用bf16
         weight_decay=0.01,
         remove_unused_columns=False,
         push_to_hub=False,
