@@ -18,19 +18,56 @@ logger = logging.getLogger(__name__)
 def run_command(command):
     """运行命令并返回结果"""
     logger.info(f"执行命令: {command}")
+    
+    # 实时输出子进程结果
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
-        shell=True
+        shell=True,
+        bufsize=1
     )
-    stdout, stderr = process.communicate()
+    
+    # 收集所有输出
+    all_stdout = []
+    all_stderr = []
+    
+    # 使用非阻塞方式读取输出
+    while True:
+        stdout_line = process.stdout.readline()
+        stderr_line = process.stderr.readline()
+        
+        if stdout_line:
+            print(stdout_line.rstrip())
+            all_stdout.append(stdout_line)
+        
+        if stderr_line:
+            print(stderr_line.rstrip(), file=sys.stderr)
+            all_stderr.append(stderr_line)
+            
+        # 检查进程是否结束
+        if process.poll() is not None:
+            # 读取剩余输出
+            for line in process.stdout:
+                print(line.rstrip())
+                all_stdout.append(line)
+            for line in process.stderr:
+                print(line.rstrip(), file=sys.stderr)
+                all_stderr.append(line)
+            break
+    
+    # 等待进程完成并获取返回码
+    process.wait()
+    
+    stdout = ''.join(all_stdout)
+    stderr = ''.join(all_stderr)
     
     if process.returncode != 0:
-        logger.error(f"命令执行失败: {stderr}")
+        logger.error(f"命令执行失败 (返回码 {process.returncode})")
         return False, stderr
     
+    logger.info(f"命令执行成功")
     return True, stdout
 
 def main():
